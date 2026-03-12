@@ -26,7 +26,7 @@ public struct VoicePlaybackProgress: Equatable, Sendable {
 
 /// Public interface for audio playback.
 /// Supports URL (file) and PCM buffer input; emits PCM currently being played.
-public protocol VoicePlayer: AnyObject, Sendable {
+public protocol VoicePlayer: AnyObject {
 
     /// PCM buffer stream of audio currently being played. Emits only when playing.
     var pcmBufferPublisher: AnyPublisher<AVAudioPCMBuffer, Never> { get }

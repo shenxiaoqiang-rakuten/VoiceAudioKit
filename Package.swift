@@ -22,6 +22,11 @@ let package = Package(
             name: "VoiceAudioImplementation",
             dependencies: ["VoiceAudioProtocol"],
             path: "Sources/VoiceAudioImplementation"
+        ),
+        .testTarget(
+            name: "VoiceAudioImplementationTests",
+            dependencies: ["VoiceAudioImplementation"],
+            path: "Tests/VoiceAudioImplementationTests"
         )
     ]
 )

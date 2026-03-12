@@ -231,6 +231,7 @@ public final class DefaultVoicePlayer: VoicePlayer {
     #if targetEnvironment(simulator)
     private var simulatorPlaybackTimer: DispatchSourceTimer?
     private var simulatorFramesPlayed: Int64 = 0
+    private var isSimulatorPlaybackTimerSuspended = false
 
     private func performPlayURLSimulator(url: URL, format: AVAudioFormat) -> Error? {
         guard let file = try? AVAudioFile(forReading: url) else { return VoicePlayerError.fileLoadFailed }
@@ -248,20 +249,41 @@ public final class DefaultVoicePlayer: VoicePlayer {
             do {
                 try file.read(into: buffer)
                 guard buffer.frameLength > 0 else {
-                    timer.cancel()
-                    self.stateQueue.async { self.performStop() }
+                    self.performStop()
                     return
                 }
                 self.simulatorFramesPlayed += Int64(buffer.frameLength)
                 self.pcmBufferSubject.send(buffer)
             } catch {
-                timer.cancel()
-                self.stateQueue.async { self.performStop() }
+                self.performStop()
             }
         }
-        timer.resume()
         simulatorPlaybackTimer = timer
+        isSimulatorPlaybackTimerSuspended = false
+        timer.resume()
         return nil
+    }
+
+    private func suspendSimulatorPlaybackTimerIfNeeded() {
+        guard let timer = simulatorPlaybackTimer, !isSimulatorPlaybackTimerSuspended else { return }
+        timer.suspend()
+        isSimulatorPlaybackTimerSuspended = true
+    }
+
+    private func resumeSimulatorPlaybackTimerIfNeeded() {
+        guard let timer = simulatorPlaybackTimer, isSimulatorPlaybackTimerSuspended else { return }
+        timer.resume()
+        isSimulatorPlaybackTimerSuspended = false
+    }
+
+    private func cancelSimulatorPlaybackTimer() {
+        guard let timer = simulatorPlaybackTimer else { return }
+        if isSimulatorPlaybackTimerSuspended {
+            timer.resume()
+            isSimulatorPlaybackTimerSuspended = false
+        }
+        timer.cancel()
+        simulatorPlaybackTimer = nil
     }
     #endif
 
@@ -392,7 +414,7 @@ public final class DefaultVoicePlayer: VoicePlayer {
     private func performPause() {
         guard state == .playing else { return }
         #if targetEnvironment(simulator)
-        simulatorPlaybackTimer?.suspend()
+        suspendSimulatorPlaybackTimerIfNeeded()
         #else
         playerNode?.pause()
         #endif
@@ -403,7 +425,7 @@ public final class DefaultVoicePlayer: VoicePlayer {
     private func performResume() {
         guard state == .paused else { return }
         #if targetEnvironment(simulator)
-        simulatorPlaybackTimer?.resume()
+        resumeSimulatorPlaybackTimerIfNeeded()
         #else
         playerNode?.play()
         #endif
@@ -417,8 +439,7 @@ public final class DefaultVoicePlayer: VoicePlayer {
             stopProgressTimer()
             progressSubject.send(VoicePlaybackProgress(currentTime: 0, duration: nil))
             #if targetEnvironment(simulator)
-            simulatorPlaybackTimer?.cancel()
-            simulatorPlaybackTimer = nil
+            cancelSimulatorPlaybackTimer()
             #else
             if let engine = audioEngine {
                 engine.mainMixerNode.removeTap(onBus: 0)

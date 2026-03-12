@@ -13,7 +13,7 @@ import Foundation
 
 /// Public interface for voice call with AEC (Acoustic Echo Cancellation).
 /// Uses AudioUnit VoiceProcessingIO under the hood.
-public protocol VoiceChatCall: AnyObject, Sendable {
+public protocol VoiceChatCall: AnyObject {
 
     /// PCM buffer stream of local microphone input (AEC applied). Emits when call is active.
     var localPcmPublisher: AnyPublisher<AVAudioPCMBuffer, Never> { get }

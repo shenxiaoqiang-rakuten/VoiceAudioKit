@@ -21,7 +21,9 @@ public final class PCMFilePlugin {
     }
 
     /// Initialize. PCM is received via `write(buffer:)` - connect any PCM source to it.
-    public init() {}
+    public init() {
+        queue.setSpecific(key: queueSpecificKey, value: queueSpecificValue)
+    }
 
     /// Write PCM buffer. Only writes when recording has been started. Thread-safe.
     public func write(_ buffer: AVAudioPCMBuffer) {
@@ -32,7 +34,7 @@ public final class PCMFilePlugin {
 
     /// Start recording to the given URL. Creates file on first buffer.
     public func startRecording(to url: URL) {
-        queue.sync {
+        syncOnQueue {
             guard !_isRecording else { return }
             outputURL = url
             _isRecording = true
@@ -43,11 +45,11 @@ public final class PCMFilePlugin {
     /// Stop recording and close the file.
     /// Call before releasing the plugin to ensure the file is closed cleanly.
     public func stopRecording() {
-        queue.sync {
-            guard _isRecording else { return }
+        syncOnQueue {
+            let wasRecording = _isRecording
             _isRecording = false
             closeFile()
-            if let url = outputURL {
+            if wasRecording, let url = outputURL {
                 stateSubject.send(.stopped(url))
             }
             outputURL = nil
@@ -66,7 +68,11 @@ public final class PCMFilePlugin {
     }
 
     deinit {
-        queue.async { [weak self] in self?.closeFile() }
+        syncOnQueue {
+            _isRecording = false
+            closeFile()
+            outputURL = nil
+        }
     }
 
     // MARK: - State
@@ -81,6 +87,8 @@ public final class PCMFilePlugin {
     // MARK: - Private
 
     private let queue = DispatchQueue(label: "com.masteraudio.pcmfileplugin", qos: .userInitiated)
+    private let queueSpecificKey = DispatchSpecificKey<UInt8>()
+    private let queueSpecificValue: UInt8 = 1
     private var _isRecording = false
     private var outputURL: URL?
     private var audioFile: AVAudioFile?
@@ -106,6 +114,7 @@ public final class PCMFilePlugin {
         } catch {
             _isRecording = false
             closeFile()
+            outputURL = nil
             stateSubject.send(.error(error))
         }
     }
@@ -124,5 +133,13 @@ public final class PCMFilePlugin {
 
     private func closeFile() {
         audioFile = nil
+    }
+
+    private func syncOnQueue(_ block: () -> Void) {
+        if DispatchQueue.getSpecific(key: queueSpecificKey) == queueSpecificValue {
+            block()
+        } else {
+            queue.sync(execute: block)
+        }
     }
 }

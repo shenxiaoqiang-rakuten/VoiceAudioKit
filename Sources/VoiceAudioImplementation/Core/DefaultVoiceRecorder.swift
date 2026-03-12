@@ -10,7 +10,7 @@ import Combine
 import Foundation
 import VoiceAudioProtocol
 
-public final class DefaultVoiceRecorder: VoiceRecorder, @unchecked Sendable {
+public final class DefaultVoiceRecorder: VoiceRecorder {
 
     public var pcmBufferPublisher: AnyPublisher<AVAudioPCMBuffer, Never> {
         pcmBufferSubject

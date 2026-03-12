@@ -27,14 +27,15 @@ VoiceAudioKit follows a **protocol-first, stream-based** design:
 ### Session Coordination
 
 - Only one active client per type (Recorder, Player, or ChatCall).
-- ChatCall takes over when started; Recorder/Player transition to `.error(.chatCallActive)`.
+- If ChatCall is already active, new Recorder/Player starts are rejected with `.chatCallActive`.
+- If ChatCall starts while Recorder/Player is running, a takeover event is emitted and default Recorder/Player implementations stop and return to `.idle`.
 - Interruptions (phone call, alarm) and route changes (Bluetooth, headphone) are propagated; clients restart or reset as needed.
 
 ### Layering
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  App: Recorder/Player/ChatCall + Plugins + UI                    │
+│  App: Recorder/Player/ChatCall + Plugins (+ optional custom UI)  │
 ├─────────────────────────────────────────────────────────────────┤
 │  VoiceAudioProtocol: VoiceRecorder, VoicePlayer, VoiceChatCall   │
 │  VoiceSessionManager (session lifecycle)                         │
@@ -99,11 +100,10 @@ VoiceAudioKit/
 │       │   ├── PCMVADPlugin.swift
 │       │   ├── PCMVisualizationPlugin.swift
 │       │   └── PCMFilePlugin.swift
-│       └── UI/                  # SwiftUI visualization components
-│           ├── SpectrumView.swift
-│           └── SpectrumShape.swift
 └── Package.swift
 ```
+
+> Note: `SpectrumView`/`SpectrumShape` are in the `Example` app target, not in the SPM library products.
 
 ## Data Flow
 
@@ -165,7 +165,7 @@ ChatCall uses VoiceProcessingIO for echo cancellation; `localPcmPublisher` emits
 | Product | Description |
 |---------|-------------|
 | **VoiceAudioProtocol** | Protocol definitions (`VoiceSessionManager`, `VoicePlayer`, `VoiceRecorder`, `VoiceChatCall`) and shared types (`VoiceClientId`, `VoiceSessionRequirement`, errors, states). Use when you need to implement custom backends. |
-| **VoiceAudioImplementation** | Default implementations, PCM plugins, and SwiftUI views. Depends on `VoiceAudioProtocol`. |
+| **VoiceAudioImplementation** | Default implementations and PCM plugins. Depends on `VoiceAudioProtocol`. |
 
 ## Usage
 
@@ -231,12 +231,7 @@ converter.convertedBufferPublisher
 
 ### SwiftUI Spectrum View
 
-```swift
-import VoiceAudioImplementation
-
-SpectrumView(spectrum: magnitudes, color: .orange)
-    .frame(height: 120)
-```
+`SpectrumView` is provided in `Example/VoiceAudioExample` for demo usage. It is not exported by `VoiceAudioImplementation`.
 
 ## Simulator Support
 
@@ -260,8 +255,53 @@ Starting a second client of the same type returns `VoiceSessionError.busy` or th
 
 ### Lifecycle
 
-- **ChatCall**: Call `stop()` before releasing. `deinit` performs a synchronous stop; ensure no other references prevent deallocation.
-- **PCMFilePlugin**: Call `stopRecording()` before releasing to ensure the file is closed cleanly.
+- **ChatCall**: `stop()` is serialized onto the internal state queue; call it before releasing to ensure orderly teardown/unregister.
+- **PCMFilePlugin**: Call `stopRecording()` before releasing; plugin teardown closes file resources on its internal queue.
+
+### State Transition Tables
+
+The tables below summarize key runtime transitions for the three default state machines.
+
+#### Recorder (`DefaultVoiceRecorder`)
+
+| Trigger | From | To | Notes |
+|--------|------|----|------|
+| `start()` success | `idle` | `recording` | Registers session with `.recordOnly` or `.recordAndPlayback` |
+| `start()` failure | `idle` | `error(*)` | Includes permission denied, busy, chat call active |
+| `stop()` | `recording` / `stopped` / `deviceSwitching` | `idle` | Stops engine, unregisters client |
+| Interruption began | `recording` | `stopped` | Engine stops immediately |
+| Interruption ended (`shouldResume = true`) | `stopped` | `recording` | Restarts engine without re-register |
+| Interruption ended (`shouldResume = false`) | `stopped` | `idle` | Unregisters client |
+| Route change (restart reasons) | `recording` | `deviceSwitching -> recording` or `idle` | Restart on `.newDeviceAvailable` / `.oldDeviceUnavailable` / `.wakeFromSleep` |
+| Chat takeover event | `recording` / `stopped` / `deviceSwitching` | `idle` | ChatCall preempts recorder and forces unregister |
+
+#### Player (`DefaultVoicePlayer`)
+
+| Trigger | From | To | Notes |
+|--------|------|----|------|
+| `play()` / `play(url:)` success | `idle` / `stopped` | `playing` | Registers session with `.playbackOnly` |
+| `play*` failure | `idle` / `stopped` | `error(*)` | Includes busy/chat call active/configuration failures |
+| `pause()` | `playing` | `paused` | Keeps session active |
+| `resume()` | `paused` | `playing` | Continues playback |
+| `stop()` / playback completed | `playing` / `paused` / `stopped` / `deviceSwitching` | `idle` | Clears queue, unregisters client |
+| Interruption began | `playing` | `stopped` | Pauses node/timer |
+| Interruption ended (`shouldResume = true`) | `stopped` | `playing` | Resumes playback |
+| Interruption ended (`shouldResume = false`) | `stopped` | `idle` | Performs full stop + unregister |
+| Route change (restart reasons) | `playing` / `paused` | `deviceSwitching -> playing` or `idle` | Rebuilds engine and restarts queued playback |
+| Chat takeover event | `playing` / `paused` / `stopped` / `deviceSwitching` | `idle` | ChatCall preempts player |
+| Chat released event | `error(.chatCallActive)` | `idle` | Allows retry after ChatCall stops |
+
+#### ChatCall (`DefaultVoiceChatCall`)
+
+| Trigger | From | To | Notes |
+|--------|------|----|------|
+| `start()` success | `idle` | `active` | Registers `.chatCall`; can emit takeover event to Recorder/Player |
+| `start()` failure | `idle` | `error(*)` | Includes permission denied and busy |
+| `stop()` | `active` / `deviceSwitching` / `error` | `idle` | Stops engine and unregisters client |
+| Interruption began | `active` | `deviceSwitching` | Engine stops and waits for ended event |
+| Interruption ended (`shouldResume = true`) | `deviceSwitching` | `active` | Restarts engine |
+| Interruption ended (`shouldResume = false`) | `deviceSwitching` | `idle` | Unregisters client |
+| Route change (restart reasons) | `active` | `deviceSwitching -> active` or `idle` | Restarts call pipeline after device switch |
 
 ### Testing
 

@@ -57,13 +57,8 @@ public final class DefaultVoiceChatCall: VoiceChatCall {
     }
 
     public func stop() {
-        stateQueue.sync { [weak self] in
-            guard let self else { return }
-            if case .error = state {
-                performStop()
-            } else {
-                stateQueue.async { self.performStop() }
-            }
+        stateQueue.async { [weak self] in
+            self?.performStop()
         }
     }
 
@@ -119,6 +114,7 @@ public final class DefaultVoiceChatCall: VoiceChatCall {
     private var state: VoiceChatCallState = .idle {
         didSet { stateSubject.send(state) }
     }
+    private var pendingStopWorkItem: DispatchWorkItem?
     private let localPcmSubject: PassthroughSubject<AVAudioPCMBuffer, Never>
     private let stateSubject: CurrentValueSubject<VoiceChatCallState, Never>
     private var cancellables = Set<AnyCancellable>()
@@ -161,20 +157,28 @@ public final class DefaultVoiceChatCall: VoiceChatCall {
     }
 
     private func performStartAfterRegister() -> Error? {
+        pendingStopWorkItem?.cancel()
+        pendingStopWorkItem = nil
         guard state == .idle else { return VoiceChatCallError.busy(String(describing: state)) }
         return startEngine()
     }
 
     private func performStop() {
+        pendingStopWorkItem?.cancel()
+        pendingStopWorkItem = nil
         switch state {
         case .active, .deviceSwitching:
-            stateQueue.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
+                self.pendingStopWorkItem = nil
                 self.stopEngine()
                 self.manager?.unregister(clientId: self.clientId)
                 self.transition(to: .idle)
             }
+            pendingStopWorkItem = workItem
+            stateQueue.asyncAfter(deadline: .now() + 0.08, execute: workItem)
         case .error:
+            stopEngine()
             manager?.unregister(clientId: clientId)
             transition(to: .idle)
         case .idle:

@@ -12,7 +12,7 @@ import VoiceAudioProtocol
 
 public final class DefaultVoiceSessionManager: VoiceSessionManager {
 
-    public nonisolated(unsafe) static let shared = DefaultVoiceSessionManager()
+    public static let shared = DefaultVoiceSessionManager()
 
     public func register(requirement: VoiceSessionRequirement, clientId: VoiceClientId) async -> Result<Void, VoiceSessionError> {
         await state.register(requirement: requirement, clientId: clientId) { [weak self] shouldEmitTakeover in
@@ -113,81 +113,30 @@ public final class DefaultVoiceSessionManager: VoiceSessionManager {
 
 private actor VoiceSessionState {
 
-    private var registry: [VoiceClientId: VoiceSessionRequirement] = [:]
+    private let registry = VoiceSessionRegistry()
     private var currentCategory: SessionCategory?
 
-    func register(requirement: VoiceSessionRequirement, clientId: VoiceClientId, onTakeover: @escaping (Bool) -> Void) async -> Result<Void, VoiceSessionError> {
-        if requirement == .recordOnly || requirement == .recordAndPlayback {
-            let hasRecord = registry.values.contains { $0 == .recordOnly || $0 == .recordAndPlayback }
-            if hasRecord {
-                return .failure(.busy("Recorder already active"))
-            }
+    func register(requirement: VoiceSessionRequirement, clientId: VoiceClientId, onTakeover: @escaping @Sendable (Bool) -> Void) async -> Result<Void, VoiceSessionError> {
+        switch await registry.register(requirement: requirement, clientId: clientId) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let result):
+            onTakeover(result.shouldEmitTakeover)
+            return await migrateTo(result.mergedCategory)
         }
-        if requirement == .playbackOnly {
-            let hasPlayback = registry.values.contains { $0 == .playbackOnly }
-            if hasPlayback {
-                return .failure(.busy("Player already active"))
-            }
-        }
-        if requirement == .chatCall {
-            let hasChatCall = registry.values.contains { $0 == .chatCall }
-            if hasChatCall {
-                return .failure(.busy("ChatCall already active"))
-            }
-        }
-
-        if requirement == .recordOnly || requirement == .playbackOnly || requirement == .recordAndPlayback {
-            let hasChatCall = registry.values.contains { $0 == .chatCall }
-            if hasChatCall {
-                return .failure(.chatCallActive)
-            }
-        }
-
-        var shouldEmitTakeover = false
-        if requirement == .chatCall {
-            let hasRecorderOrPlayer = registry.values.contains {
-                $0 == .recordOnly || $0 == .playbackOnly || $0 == .recordAndPlayback
-            }
-            shouldEmitTakeover = hasRecorderOrPlayer
-        }
-
-        registry[clientId] = requirement
-        let merged = mergeRequirements(Array(registry.values))
-
-        onTakeover(shouldEmitTakeover)
-        return await migrateTo(merged)
     }
 
-    func unregister(clientId: VoiceClientId) -> Bool {
-        let requirement = registry[clientId]
-        registry[clientId] = nil
-        let wasChatCall = requirement == .chatCall
-        if registry.isEmpty {
+    func unregister(clientId: VoiceClientId) async -> Bool {
+        let result = await registry.unregister(clientId: clientId)
+        if result.isEmpty {
             currentCategory = nil
             #if !targetEnvironment(simulator)
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             #endif
         } else {
-            let merged = mergeRequirements(Array(registry.values))
-            Task { await migrateTo(merged) }
+            Task { await migrateTo(result.mergedCategory) }
         }
-        return wasChatCall
-    }
-
-    private func mergeRequirements(_ reqs: [VoiceSessionRequirement]) -> SessionCategory {
-        let hasRecord = reqs.contains { $0 == .recordOnly || $0 == .recordAndPlayback || $0 == .chatCall }
-        let hasPlayback = reqs.contains { $0 == .playbackOnly || $0 == .recordAndPlayback || $0 == .chatCall }
-
-        if hasRecord && hasPlayback {
-            return .playAndRecord
-        }
-        if hasRecord {
-            return .record
-        }
-        if hasPlayback {
-            return .playback
-        }
-        return .ambient
+        return result.wasChatCall
     }
 
     private func migrateTo(_ target: SessionCategory) async -> Result<Void, VoiceSessionError> {
@@ -225,8 +174,90 @@ private actor VoiceSessionState {
     }
 }
 
+internal struct VoiceSessionRegisterResult: Sendable {
+    let mergedCategory: SessionCategory
+    let shouldEmitTakeover: Bool
+}
+
+internal struct VoiceSessionUnregisterResult: Sendable {
+    let wasChatCall: Bool
+    let mergedCategory: SessionCategory
+    let isEmpty: Bool
+}
+
+internal actor VoiceSessionRegistry {
+    private var registry: [VoiceClientId: VoiceSessionRequirement] = [:]
+
+    func register(requirement: VoiceSessionRequirement, clientId: VoiceClientId) -> Result<VoiceSessionRegisterResult, VoiceSessionError> {
+        if requirement == .recordOnly || requirement == .recordAndPlayback {
+            let hasRecord = registry.values.contains { $0 == .recordOnly || $0 == .recordAndPlayback }
+            if hasRecord {
+                return .failure(.busy("Recorder already active"))
+            }
+        }
+        if requirement == .playbackOnly {
+            let hasPlayback = registry.values.contains { $0 == .playbackOnly }
+            if hasPlayback {
+                return .failure(.busy("Player already active"))
+            }
+        }
+        if requirement == .chatCall {
+            let hasChatCall = registry.values.contains { $0 == .chatCall }
+            if hasChatCall {
+                return .failure(.busy("ChatCall already active"))
+            }
+        }
+        if requirement == .recordOnly || requirement == .playbackOnly || requirement == .recordAndPlayback {
+            let hasChatCall = registry.values.contains { $0 == .chatCall }
+            if hasChatCall {
+                return .failure(.chatCallActive)
+            }
+        }
+
+        let shouldEmitTakeover: Bool
+        if requirement == .chatCall {
+            shouldEmitTakeover = registry.values.contains {
+                $0 == .recordOnly || $0 == .playbackOnly || $0 == .recordAndPlayback
+            }
+        } else {
+            shouldEmitTakeover = false
+        }
+
+        registry[clientId] = requirement
+        let merged = mergeRequirements(Array(registry.values))
+        return .success(VoiceSessionRegisterResult(mergedCategory: merged, shouldEmitTakeover: shouldEmitTakeover))
+    }
+
+    func unregister(clientId: VoiceClientId) -> VoiceSessionUnregisterResult {
+        let requirement = registry[clientId]
+        registry[clientId] = nil
+        let wasChatCall = requirement == .chatCall
+        if registry.isEmpty {
+            return VoiceSessionUnregisterResult(wasChatCall: wasChatCall, mergedCategory: .ambient, isEmpty: true)
+        }
+        let merged = mergeRequirements(Array(registry.values))
+        return VoiceSessionUnregisterResult(wasChatCall: wasChatCall, mergedCategory: merged, isEmpty: false)
+    }
+
+    private func mergeRequirements(_ reqs: [VoiceSessionRequirement]) -> SessionCategory {
+        let hasRecord = reqs.contains { $0 == .recordOnly || $0 == .recordAndPlayback || $0 == .chatCall }
+        let hasPlayback = reqs.contains { $0 == .playbackOnly || $0 == .recordAndPlayback || $0 == .chatCall }
+
+        if hasRecord && hasPlayback {
+            return .playAndRecord
+        }
+        if hasRecord {
+            return .record
+        }
+        if hasPlayback {
+            return .playback
+        }
+        return .ambient
+    }
+}
+
 // MARK: - Session Category
-private enum SessionCategory: Equatable {
+internal enum SessionCategory: Equatable, Sendable {
     case ambient
     case record
     case playback

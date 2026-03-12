@@ -12,7 +12,7 @@ import Foundation
 // MARK: - VoiceRecorder (Protocol)
 
 /// Public interface for audio recording.
-public protocol VoiceRecorder: AnyObject, Sendable {
+public protocol VoiceRecorder: AnyObject {
 
     /// PCM buffer stream. Emits only when recording. Use buffer/drop operators for backpressure.
     var pcmBufferPublisher: AnyPublisher<AVAudioPCMBuffer, Never> { get }
